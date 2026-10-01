@@ -146,14 +146,25 @@ else
     gcloud iam service-accounts create "${VM_SA_NAME}" \
         --display-name="Stage 2 CSE Confidential VM Service Account" \
         --project="${PROJECT_ID}"
-    echo "   ✅ Service Account '${VM_SA_EMAIL}' created."
+    echo "   ✅ Service Account '${VM_SA_EMAIL}' created. Waiting briefly for IAM propagation..."
+    sleep 10
 fi
 
 echo "   🔑 Granting bucket-scoped roles/storage.objectAdmin on 'gs://${STAGE2_BUCKET_NAME}' to '${VM_SA_EMAIL}'..."
-gcloud storage buckets add-iam-policy-binding "gs://${STAGE2_BUCKET_NAME}" \
-    --member="serviceAccount:${VM_SA_EMAIL}" \
-    --role="roles/storage.objectAdmin" \
-    --project="${PROJECT_ID}" >/dev/null
+for SA_PROP_ATTEMPT in {1..6}; do
+    if gcloud storage buckets add-iam-policy-binding "gs://${STAGE2_BUCKET_NAME}" \
+        --member="serviceAccount:${VM_SA_EMAIL}" \
+        --role="roles/storage.objectAdmin" \
+        --project="${PROJECT_ID}" >/dev/null 2>&1; then
+        break
+    fi
+    if [[ "${SA_PROP_ATTEMPT}" -eq 6 ]]; then
+        echo "❌ ERROR: Failed to bind roles/storage.objectAdmin to '${VM_SA_EMAIL}' after 6 attempts." >&2
+        exit 1
+    fi
+    echo "   ⏳ Waiting for Service Account '${VM_SA_EMAIL}' IAM propagation (attempt ${SA_PROP_ATTEMPT}/6)..."
+    sleep 5
+done
 
 echo "   🔑 Granting key-scoped roles/cloudkms.cryptoKeyEncrypterDecrypter on '${KMS_CRYPTO_KEY}' to '${VM_SA_EMAIL}'..."
 gcloud kms keys add-iam-policy-binding "${KMS_CRYPTO_KEY}" \

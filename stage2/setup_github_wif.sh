@@ -81,6 +81,7 @@ fi
 ROLES=(
     "roles/serviceusage.serviceUsageAdmin"
     "roles/compute.networkAdmin"
+    "roles/compute.securityAdmin"
     "roles/compute.instanceAdmin.v1"
     "roles/iap.tunnelResourceAccessor"
     "roles/cloudkms.admin"
@@ -150,10 +151,21 @@ PRINCIPAL_SET="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/loca
 WIF_PROVIDER_RESOURCE="projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${WIF_POOL_NAME}/providers/${WIF_PROVIDER_NAME}"
 
 echo "🔗 [5/5] Binding roles/iam.workloadIdentityUser on '${CI_SA_EMAIL}' to '${PRINCIPAL_SET}'..."
-gcloud iam service-accounts add-iam-policy-binding "${CI_SA_EMAIL}" \
-    --project="${PROJECT_ID}" \
-    --role="roles/iam.workloadIdentityUser" \
-    --member="${PRINCIPAL_SET}" >/dev/null
+for WIF_BIND_ATTEMPT in {1..6}; do
+    if gcloud iam service-accounts add-iam-policy-binding "${CI_SA_EMAIL}" \
+        --project="${PROJECT_ID}" \
+        --role="roles/iam.workloadIdentityUser" \
+        --member="${PRINCIPAL_SET}" >/dev/null 2>&1; then
+        echo "   ✅ Bound roles/iam.workloadIdentityUser on '${CI_SA_EMAIL}'."
+        break
+    fi
+    if [[ "${WIF_BIND_ATTEMPT}" -eq 6 ]]; then
+        echo "❌ ERROR: Failed to bind roles/iam.workloadIdentityUser on '${CI_SA_EMAIL}' after 6 attempts." >&2
+        exit 1
+    fi
+    echo "   ⏳ Waiting for Service Account '${CI_SA_EMAIL}' IAM propagation (attempt ${WIF_BIND_ATTEMPT}/6)..."
+    sleep 5
+done
 
 echo "=========================================="
 echo "🎉 Workload Identity Federation (WIF) Setup Complete!"

@@ -24,6 +24,7 @@ gcloud config set project "${PROJECT_ID}" >/dev/null
 ROLES=(
     "roles/serviceusage.serviceUsageAdmin"
     "roles/compute.networkAdmin"
+    "roles/compute.securityAdmin"
     "roles/compute.instanceAdmin.v1"
     "roles/iap.tunnelResourceAccessor"
     "roles/cloudkms.admin"
