@@ -1,0 +1,12 @@
+# Ignore active environment configuration files containing project IDs or principals
+*.env
+!*.env.example
+
+# macOS & Editor artifacts
+.DS_Store
+*.swp
+*~
+
+# Temporary & log files
+*.log
+*.tmp
