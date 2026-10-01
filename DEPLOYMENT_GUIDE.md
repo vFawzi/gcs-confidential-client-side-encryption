@@ -117,6 +117,8 @@ Run `./grant_deployer_iam.sh` as a Project/Organization IAM Administrator to gra
 Run the deployment script to enable APIs, verify/create the VPC/Subnet/Cloud NAT, provision the 3 dedicated Service Accounts, create the Cloud KMS KeyRing/Key and GCS buckets, build the `cse-sidecar` container image via Cloud Build, provision the Confidential GKE cluster (`cse-confidential-cluster`), and deploy the 2-replica `secure-app-deployment`.
 
 ```bash
+chmod +x cse_config.env deploy_cse_gke.sh test_cse_gke.sh cleanup_cse_env.sh                           
+source ./cse_config.env
 ./deploy_cse_gke.sh
 ```
 
