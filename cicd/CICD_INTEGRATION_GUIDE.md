@@ -165,42 +165,39 @@ To eliminate long-lived Google Cloud Service Account JSON keys, the GitHub Actio
 +---------------------------------------------------------------------------------------+
 ```
 
-### 4.2 Step 1: Run the One-Time WIF Bootstrap Script (`setup_github_wif.sh`)
+### 4.2 Step 1: Run the One-Time WIF Bootstrap Script (`cicd/setup_github_wif.sh`)
 
-> **IMPORTANT:** You **must** run [`stage2/setup_github_wif.sh`](../stage2/setup_github_wif.sh) **once** as a Project or Organization IAM Administrator before triggering the GitHub Actions pipeline.
+> **IMPORTANT:** You **must** export `PROJECT_ID` and run [`cicd/setup_github_wif.sh`](./setup_github_wif.sh) **once** as a Project or Organization IAM Administrator before triggering the GitHub Actions pipeline.
 
-1. Ensure `stage2/stage2_config.env` exists and defines your target `PROJECT_ID` (e.g., `cloud-cse-002`) and `GITHUB_REPO` (e.g., `vFawzi/gcs-confidential-client-side-encryption`):
+1. Export your target Google Cloud Project ID and ensure `stage2/stage2_config.env` exists with your `GITHUB_REPO` configured:
    ```bash
-   cd stage2 && cp stage2_config.env.example stage2_config.env && chmod +x *.sh *.env
+   export PROJECT_ID="your-project-id" && cp stage2/stage2_config.env.example stage2/stage2_config.env && chmod +x cicd/*.sh stage2/*.sh stage2/*.env
    ```
-2. Edit `stage2/stage2_config.env` to set `PROJECT_ID="cloud-cse-002"` and `GITHUB_REPO="vFawzi/gcs-confidential-client-side-encryption"`.
-3. Execute the WIF bootstrap script from the `stage2/` directory:
+2. Edit `stage2/stage2_config.env` (or export `GITHUB_REPO="owner/gcs-confidential-client-side-encryption"`) so that `PROJECT_ID` and `GITHUB_REPO` match your environment.
+3. Execute the WIF bootstrap script from the repository root:
    ```bash
-   ./setup_github_wif.sh
+   ./cicd/setup_github_wif.sh
    ```
 
-What `setup_github_wif.sh` provisions automatically:
-- Creates the dedicated CI/CD Service Account (`cse-github-ci-sa@${PROJECT_ID}.iam.gserviceaccount.com`) and grants it the exact Stage 2 deployment roles defined in [`grant_stage2_iam.sh`](../stage2/grant_stage2_iam.sh).
+What `cicd/setup_github_wif.sh` provisions automatically:
+- Creates the dedicated CI/CD Service Account (`cse-github-ci-sa@${PROJECT_ID}.iam.gserviceaccount.com`) and grants it the exact Stage 2 deployment roles defined in [`grant_stage2_iam.sh`](../stage2/grant_stage2_iam.sh) (including `roles/compute.securityAdmin` for IAP firewall lifecycle).
 - Creates the Workload Identity Pool (`github-actions-pool`) and OIDC Provider (`github-oidc-provider`) for `https://token.actions.githubusercontent.com` with attribute mapping `google.subject=assertion.sub,attribute.repository=assertion.repository`.
-- Binds `roles/iam.workloadIdentityUser` on `cse-github-ci-sa` strictly to `principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/github-actions-pool/attribute.repository/${GITHUB_REPO}`.
-- Outputs the exact `WIF_PROVIDER` and `CI_SA_EMAIL` strings required for GitHub Repository Secrets.
+- Binds `roles/iam.workloadIdentityUser` on `cse-github-ci-sa@${PROJECT_ID}.iam.gserviceaccount.com` strictly to `principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/github-actions-pool/attribute.repository/${GITHUB_REPO}`.
+- Outputs the dynamically constructed `PROJECT_ID`, `WIF_PROVIDER`, and `CI_SA_EMAIL` strings required for GitHub Repository Secrets / Variables.
 
-### 4.3 Step 2: Configure GitHub Repository Secrets in the GitHub UI
+### 4.3 Step 2: Configure GitHub Repository Secrets / Variables
 
-After running `./setup_github_wif.sh`, copy the two output values printed in your terminal and add them to your GitHub repository:
+After running `./cicd/setup_github_wif.sh`, configure the output values in your GitHub repository (**Settings** $\rightarrow$ **Secrets and variables** $\rightarrow$ **Actions**):
 
-1. Open your GitHub repository in a browser (`https://github.com/<owner>/gcs-confidential-client-side-encryption`).
-2. Navigate to **Settings** $\rightarrow$ **Secrets and variables** $\rightarrow$ **Actions** in the left sidebar.
-3. Click **New repository secret** and add the following two secrets:
-
-| Secret Name | Value Format (Copy from `./setup_github_wif.sh` Output) | Example Value (`cloud-cse-002`) |
+| Secret / Variable Name | Value Format (Copy from `./cicd/setup_github_wif.sh` Output) | Example Value (`your-project-id`) |
 | :--- | :--- | :--- |
+| **`PROJECT_ID`** | `<PROJECT_ID>` (Secret or Repository Variable) | `your-project-id` |
 | **`WIF_PROVIDER`** | `projects/<PROJECT_NUMBER>/locations/global/workloadIdentityPools/github-actions-pool/providers/github-oidc-provider` | `projects/123456789012/locations/global/workloadIdentityPools/github-actions-pool/providers/github-oidc-provider` |
-| **`CI_SA_EMAIL`** | `cse-github-ci-sa@<PROJECT_ID>.iam.gserviceaccount.com` | `cse-github-ci-sa@cloud-cse-002.iam.gserviceaccount.com` |
+| **`CI_SA_EMAIL`** | `cse-github-ci-sa@<PROJECT_ID>.iam.gserviceaccount.com` | `cse-github-ci-sa@your-project-id.iam.gserviceaccount.com` |
 
 ### 4.4 Step 3: Triggering & Monitoring the Pipeline
 
-Once the `WIF_PROVIDER` and `CI_SA_EMAIL` secrets are saved in GitHub:
+Once `PROJECT_ID`, `WIF_PROVIDER`, and `CI_SA_EMAIL` are saved in GitHub:
 - **Automatic Trigger:** Any `git push origin main` will automatically trigger the **`Stage 2 Confidential VM CSE E2E Validation`** workflow.
 - **Manual Trigger:** In the GitHub UI, navigate to **Actions** $\rightarrow$ **Stage 2 Confidential VM CSE E2E Validation** $\rightarrow$ **Run workflow** (`workflow_dispatch`).
 - **FinOps Guarantee (`if: always()`):** The final step (`Teardown Stage 2 Infrastructure`) is configured with `if: always()`, guaranteeing that `./cleanup_stage2.sh` destroys the Confidential VM, IAP firewall rule, Stage 2 GCS bucket, and `cse-vm-sa` Service Account even if an earlier deployment or test assertion fails.

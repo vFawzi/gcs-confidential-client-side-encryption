@@ -34,6 +34,8 @@ This repository contains two **100% independent, self-contained** CSE reference 
 
 ```text
 gcs-confidential-client-side-encryption/
+├── .github/workflows/
+│   └── stage2-ci.yml                # Automated Stage 2 E2E validation via Workload Identity Federation
 ├── .gitignore                       # Ignores active *.env files while tracking *.env.example
 ├── README.md                        # Architectural overview & repository landing page
 ├── DEPLOYMENT_GUIDE.md              # Stage 1 (Confidential GKE Sidecar Proxy) operational runbook
@@ -46,6 +48,9 @@ gcs-confidential-client-side-encryption/
 ├── test_cse_gke.sh                  # Stage 1 4-step cross-pod E2E verification suite
 ├── revoke_deployer_iam.sh           # Stage 1 post-deployment IAM revocation script (Zero Standing Privilege)
 ├── cleanup_cse_env.sh               # Stage 1 FinOps infrastructure teardown script
+├── cicd/
+│   ├── CICD_INTEGRATION_GUIDE.md    # STET artifact encryption & GitHub Actions WIF CI/CD guide
+│   └── setup_github_wif.sh          # One-time Workload Identity Federation (WIF) bootstrap script
 └── stage2/
     ├── DEPLOYMENT_GUIDE.md          # Stage 2 (Confidential VM OS-Level Agent) operational runbook
     ├── DEVELOPER_GUIDE.md           # Stage 2 architecture, threat model & POSIX developer guide
@@ -62,20 +67,21 @@ gcs-confidential-client-side-encryption/
 ## 4. Quick Start & Documentation Links
 
 ### Stage 1: Stateless Envelope Encryption via HTTP Sidecar Proxy (Confidential GKE)
-1. Copy the configuration template and populate your target GCP Project ID and deployer identity:
+1. Export your target GCP Project ID, copy the configuration template, and populate your deployer identity:
    ```bash
-   cp cse_config.env.example cse_config.env
+   export PROJECT_ID="your-project-id" && cp cse_config.env.example cse_config.env
    ```
 2. Follow the complete operational lifecycle in the **[Stage 1 Deployment Guide](./DEPLOYMENT_GUIDE.md)**.
 3. Review SDK integration patterns (Python, Go, Node.js) in the **[Stage 1 Developer Guide](./DEVELOPER_GUIDE.md)**.
 
 ### Stage 2: Transparent OS-Level Agent via `gocryptfs` + `gcsfuse` (Confidential VM)
-1. Copy the Stage 2 configuration template and populate your target GCP Project ID and deployer identity:
+1. Export your target GCP Project ID, copy the Stage 2 configuration template, and populate your deployer identity:
    ```bash
-   cp stage2/stage2_config.env.example stage2/stage2_config.env
+   export PROJECT_ID="your-project-id" && cp stage2/stage2_config.env.example stage2/stage2_config.env
    ```
 2. Follow the complete operational lifecycle in the **[Stage 2 Deployment Guide](./stage2/DEPLOYMENT_GUIDE.md)**.
 3. Review the OS-level FUSE overlay architecture, threat model, and POSIX integration patterns in the **[Stage 2 Developer Guide](./stage2/DEVELOPER_GUIDE.md)**.
+4. For automated GitHub Actions E2E validation via Workload Identity Federation ([`cicd/setup_github_wif.sh`](./cicd/setup_github_wif.sh)) and ephemeral artifact encryption (`stet`), see the **[CI/CD Integration Guide](./cicd/CICD_INTEGRATION_GUIDE.md)**.
 
 ---
 

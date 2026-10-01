@@ -1,36 +1,40 @@
 #!/bin/bash
-# v2/stage2/setup_github_wif.sh - Bootstrap Keyless Workload Identity Federation (WIF) for Stage 2 GitHub Actions CI/CD
+# v2/cicd/setup_github_wif.sh - Bootstrap Keyless Workload Identity Federation (WIF) for Stage 2 GitHub Actions CI/CD
 # Run once as a Project / Organization IAM Administrator before triggering the GitHub Actions workflow.
+# Prerequisite: export PROJECT_ID="<your-project-id>" before running this script.
 
 set -euo pipefail
 
 # ==========================================
-# 1. SOURCE STAGE 2 CONFIGURATION
+# 1. SOURCE STAGE 2 CONFIGURATION & VALIDATE PROJECT_ID
 # ==========================================
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONFIG_FILE="${SCRIPT_DIR}/stage2_config.env"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+CONFIG_FILE="${REPO_ROOT}/stage2/stage2_config.env"
 
-if [[ ! -f "${CONFIG_FILE}" ]]; then
-    echo "❌ ERROR: Configuration file not found at ${CONFIG_FILE}" >&2
-    echo "   Copy 'stage2_config.env.example' to 'stage2_config.env' and configure PROJECT_ID and GITHUB_REPO first." >&2
-    exit 1
+ENV_PROJECT_ID="${PROJECT_ID:-}"
+ENV_GITHUB_REPO="${GITHUB_REPO:-}"
+
+if [[ -f "${CONFIG_FILE}" ]]; then
+    # shellcheck source=../stage2/stage2_config.env
+    source "${CONFIG_FILE}"
 fi
 
-# shellcheck source=stage2_config.env
-source "${CONFIG_FILE}"
-
-PROJECT_ID="${1:-${PROJECT_ID:-}}"
-GITHUB_REPO="${2:-${GITHUB_REPO:-}}"
+PROJECT_ID="${1:-${ENV_PROJECT_ID:-${PROJECT_ID:-}}}"
+GITHUB_REPO="${2:-${ENV_GITHUB_REPO:-${GITHUB_REPO:-}}}"
 
 if [[ -z "${PROJECT_ID}" || "${PROJECT_ID}" == "your-project-id" ]]; then
-    echo "❌ ERROR: PROJECT_ID must be set to a valid GCP project ID (e.g., cloud-cse-002) in ${CONFIG_FILE}." >&2
+    echo "❌ ERROR: PROJECT_ID must be exported (e.g., export PROJECT_ID=\"your-gcp-project-id\") or configured in ${CONFIG_FILE}." >&2
     exit 1
 fi
 
 if [[ -z "${GITHUB_REPO}" || "${GITHUB_REPO}" == "username/gcs-confidential-client-side-encryption" ]]; then
-    echo "❌ ERROR: GITHUB_REPO must be set in ${CONFIG_FILE} (e.g., vFawzi/gcs-confidential-client-side-encryption)." >&2
+    echo "❌ ERROR: GITHUB_REPO must be exported or set in ${CONFIG_FILE} (e.g., owner/gcs-confidential-client-side-encryption)." >&2
     exit 1
 fi
+
+export PROJECT_ID
+export GITHUB_REPO
 
 CI_SA_NAME="${CI_SA_NAME:-cse-github-ci-sa}"
 CI_SA_EMAIL="${CI_SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
@@ -170,8 +174,9 @@ done
 echo "=========================================="
 echo "🎉 Workload Identity Federation (WIF) Setup Complete!"
 echo "=========================================="
-echo "Add the following two Repository Secrets in GitHub (Settings -> Secrets and variables -> Actions):"
+echo "Add the following Repository Secrets / Variables in GitHub (Settings -> Secrets and variables -> Actions):"
 echo ""
-echo "  1. WIF_PROVIDER : ${WIF_PROVIDER_RESOURCE}"
-echo "  2. CI_SA_EMAIL  : ${CI_SA_EMAIL}"
+echo "  1. PROJECT_ID   : ${PROJECT_ID}"
+echo "  2. WIF_PROVIDER : ${WIF_PROVIDER_RESOURCE}"
+echo "  3. CI_SA_EMAIL  : ${CI_SA_EMAIL}"
 echo "=========================================="

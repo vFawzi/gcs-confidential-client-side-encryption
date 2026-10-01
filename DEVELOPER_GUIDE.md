@@ -332,4 +332,13 @@ main().catch((err) => {
 
 ### Recommended Development & Testing Workflow
 - **Local Unit Tests:** Make the `api_endpoint` configurable via the `PROXY_ENDPOINT` environment variable. In local unit tests outside GKE, either mock the GCS client or point `PROXY_ENDPOINT` to a local mock server (`fake-gcs-server`).
-- **Integration Testing in Confidential GKE (Cloud Shell):** To validate end-to-end encryption and decryption against real Cloud KMS and GCS resources, execute your code inside the deployed GKE Pod (`secure-app-deployment`) or run the Cloud Shell validation suite (`./test_cse_gke.sh`).
+- **Exporting `PROJECT_ID` Before Running Local Scripts:** All local deployment, verification, and CI/CD bootstrap scripts dynamically construct Service Account emails, Cloud KMS URIs, and GCS bucket names from `${PROJECT_ID}`. Always export `PROJECT_ID` in your terminal before running any local script:
+  ```bash
+  export PROJECT_ID="your-project-id"
+  ./deploy_cse_gke.sh
+  ./test_cse_gke.sh
+  ```
+- **CI/CD Workload Identity Federation Bootstrap (`cicd/setup_github_wif.sh`):** To bootstrap keyless GitHub Actions authentication, export `PROJECT_ID` and run [`cicd/setup_github_wif.sh`](./cicd/setup_github_wif.sh) from the repository root (see [`cicd/CICD_INTEGRATION_GUIDE.md`](./cicd/CICD_INTEGRATION_GUIDE.md) for full details):
+  ```bash
+  export PROJECT_ID="your-project-id" && ./cicd/setup_github_wif.sh
+  ```

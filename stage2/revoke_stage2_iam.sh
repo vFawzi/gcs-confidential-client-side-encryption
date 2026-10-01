@@ -13,11 +13,17 @@ if [[ ! -f "${CONFIG_FILE}" ]]; then
     exit 1
 fi
 
+ENV_PROJECT_ID="${PROJECT_ID:-}"
 # shellcheck source=stage2_config.env
 source "${CONFIG_FILE}"
 
-PROJECT_ID="${1:-${PROJECT_ID}}"
+PROJECT_ID="${1:-${ENV_PROJECT_ID:-${PROJECT_ID:-}}}"
 DEPLOYER_PRINCIPAL="${2:-${DEPLOYER_PRINCIPAL:-user:user@example.com}}"
+
+if [[ -z "${PROJECT_ID}" || "${PROJECT_ID}" == "your-project-id" ]]; then
+    echo "❌ ERROR: PROJECT_ID must be exported (e.g., export PROJECT_ID=\"your-gcp-project-id\") or configured in ${CONFIG_FILE}." >&2
+    exit 1
+fi
 
 gcloud config set project "${PROJECT_ID}" >/dev/null
 

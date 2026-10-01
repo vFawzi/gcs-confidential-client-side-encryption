@@ -15,8 +15,19 @@ if [[ ! -f "${CONFIG_FILE}" ]]; then
     exit 1
 fi
 
+ENV_PROJECT_ID="${PROJECT_ID:-}"
 # shellcheck source=stage2_config.env
 source "${CONFIG_FILE}"
+export PROJECT_ID="${ENV_PROJECT_ID:-${PROJECT_ID:-}}"
+
+if [[ -z "${PROJECT_ID}" || "${PROJECT_ID}" == "your-project-id" ]]; then
+    echo "❌ ERROR: PROJECT_ID must be exported (e.g., export PROJECT_ID=\"your-gcp-project-id\") or configured in ${CONFIG_FILE}." >&2
+    exit 1
+fi
+
+export VM_SA_EMAIL="${VM_SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+export STAGE2_BUCKET_NAME="cse-os-agent-bucket-${PROJECT_ID}"
+export KMS_KEY_URI="gcp-kms://projects/${PROJECT_ID}/locations/${REGION}/keyRings/${KMS_KEY_RING}/cryptoKeys/${KMS_CRYPTO_KEY}"
 
 echo "=========================================="
 echo "🚀 Starting Stage 2 OS-Level Agent CSE Deployment"

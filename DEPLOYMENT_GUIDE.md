@@ -58,21 +58,21 @@ Before executing the Stage 1 lifecycle scripts, ensure the following requirement
 
 All Stage 1 scripts source their environment variables from `v2/cse_config.env`.
 
-### 3.1 Copy the Configuration Template
+### 3.1 Export `PROJECT_ID` & Copy the Configuration Template
 
-Before running any script, copy the sanitized template `cse_config.env.example` to `cse_config.env`:
+Before running any script, export `PROJECT_ID` and copy the sanitized template `cse_config.env.example` to `cse_config.env`:
 
 ```bash
-cp cse_config.env.example cse_config.env && chmod +x *.sh *.env
+export PROJECT_ID="your-project-id" && cp cse_config.env.example cse_config.env && chmod +x *.sh *.env
 ```
 
 ### 3.2 Customize Environment Variables
 
-Open `cse_config.env` and update the placeholders (`your-project-id`, `user@example.com`) to match your target GCP environment:
+Open `cse_config.env` and verify the placeholders (`your-project-id`, `user@example.com`) match your target GCP environment:
 
 | Variable | Template Default | Description |
 | :--- | :--- | :--- |
-| `PROJECT_ID` | `your-project-id` | Target Google Cloud Project ID. **Modify this first** for your target environment. |
+| `PROJECT_ID` | `${PROJECT_ID:-your-project-id}` | Target Google Cloud Project ID. Export `PROJECT_ID` in your shell or set here before running scripts. |
 | `REGION` | `europe-west4` | Target GCP region (enforces EU data residency for GCS, KMS, and Artifact Registry). |
 | `ZONE` | `europe-west4-a` | Target GCP compute zone for the Confidential GKE cluster. |
 | `DEPLOYER_PRINCIPAL` | `user:user@example.com` | IAM member (`user:...` or `serviceAccount:...`) granted temporary deployment permissions. |

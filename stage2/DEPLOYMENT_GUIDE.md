@@ -67,21 +67,21 @@ Before executing the Stage 2 lifecycle scripts, verify the following:
 
 Stage 2 is 100% decoupled from Stage 1 and sources all configuration parameters from `v2/stage2/stage2_config.env`.
 
-### 3.1 Copy the Configuration Template
+### 3.1 Export `PROJECT_ID` & Copy the Configuration Template
 
-Before running any Stage 2 script, copy the sanitized template `stage2_config.env.example` to `stage2_config.env`:
+All Stage 2 scripts dynamically construct Service Account emails, Cloud KMS URIs, and GCS bucket names from `${PROJECT_ID}`. Before running any Stage 2 script (or the CI/CD WIF bootstrap [`../cicd/setup_github_wif.sh`](../cicd/setup_github_wif.sh)), export `PROJECT_ID` and copy the sanitized template `stage2_config.env.example` to `stage2_config.env`:
 
 ```bash
-cd stage2 && cp stage2_config.env.example stage2_config.env && chmod +x *.sh *.env
+export PROJECT_ID="your-project-id" && cd stage2 && cp stage2_config.env.example stage2_config.env && chmod +x *.sh *.env
 ```
 
 ### 3.2 Customize Environment Variables
 
-Open `stage2_config.env` and update the placeholders (`your-project-id`, `user@example.com`) to match your target GCP environment:
+Open `stage2_config.env` and verify the placeholders (`your-project-id`, `user@example.com`) match your target GCP environment:
 
 | Variable | Template Default | Description |
 | :--- | :--- | :--- |
-| `PROJECT_ID` | `your-project-id` | Target Google Cloud Project ID. **Modify this first** if deploying to a new project. |
+| `PROJECT_ID` | `${PROJECT_ID:-your-project-id}` | Target Google Cloud Project ID. Export `PROJECT_ID` in your shell or set here before running scripts. |
 | `REGION` | `europe-west4` | Target GCP region (enforces EU data residency for GCS, KMS, and Cloud NAT). |
 | `ZONE` | `europe-west4-a` | Target GCP zone for the AMD SEV Confidential VM (`n2d-standard-2`). |
 | `DEPLOYER_PRINCIPAL` | `user:user@example.com` | IAM principal granted temporary Stage 2 deployment permissions. |

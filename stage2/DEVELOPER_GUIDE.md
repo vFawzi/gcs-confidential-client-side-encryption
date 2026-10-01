@@ -158,18 +158,20 @@ cat /mnt/gcs_secure/file.txt
 2. **Target GCP Project:** A Google Cloud project with billing enabled (e.g., `your-project-id`) and quota for `n2d-standard-2` Confidential Computing instances in `europe-west4`.
 3. **IAM Administrator Privileges:** Required for Step 1 (`./grant_stage2_iam.sh`) to grant least-privilege deployment roles to your `DEPLOYER_PRINCIPAL` (and `./revoke_stage2_iam.sh` to strip them post-deployment).
 
-### 5.2 Configuration (`stage2_config.env.example` $\rightarrow$ `stage2_config.env`)
+### 5.2 Configuration (`stage2_config.env.example` $\rightarrow$ `stage2_config.env` & Exporting `PROJECT_ID`)
 
-Navigate to `v2/stage2/` and copy the sanitized template `stage2_config.env.example` to `stage2_config.env`:
+> **Important:** All Stage 2 and CI/CD scripts dynamically construct Service Account emails, Cloud KMS URIs, and GCS bucket names from `${PROJECT_ID}`. You **must** export `PROJECT_ID` in your terminal before executing local scripts (or set it in `stage2/stage2_config.env`).
+
+Navigate to `v2/stage2/`, export your target `PROJECT_ID`, and copy the sanitized template `stage2_config.env.example` to `stage2_config.env`:
 
 ```bash
-cd stage2 && cp stage2_config.env.example stage2_config.env && chmod +x *.sh *.env
+export PROJECT_ID="your-project-id" && cd stage2 && cp stage2_config.env.example stage2_config.env && chmod +x *.sh *.env
 ```
 
-Edit `stage2_config.env` and populate your target `PROJECT_ID` and `DEPLOYER_PRINCIPAL`:
+Review `stage2_config.env` and verify your `PROJECT_ID` and `DEPLOYER_PRINCIPAL`:
 
 ```bash
-export PROJECT_ID="your-project-id"
+export PROJECT_ID="${PROJECT_ID:-your-project-id}"
 export REGION="europe-west4"
 export ZONE="europe-west4-a"
 export DEPLOYER_PRINCIPAL="user:user@example.com"
@@ -198,11 +200,11 @@ export IAP_NETWORK_TAG="cse-iap-ssh"
 
 ## 6. Execution Lifecycle
 
-Execute the following lifecycle phases in order from the `v2/stage2/` directory:
+Ensure `export PROJECT_ID="your-project-id"` is set in your active shell, then execute the following lifecycle phases in order from the `v2/stage2/` directory (or bootstrap keyless GitHub Actions CI/CD from the repository root via [`../cicd/setup_github_wif.sh`](../cicd/setup_github_wif.sh)):
 
 ### 6.1 IAM Bootstrap (`./grant_stage2_iam.sh`)
 
-Grants `DEPLOYER_PRINCIPAL` the least-privilege IAM roles required to provision and verify Stage 2 (`roles/serviceusage.serviceUsageAdmin`, `roles/compute.networkAdmin`, `roles/compute.instanceAdmin.v1`, `roles/iap.tunnelResourceAccessor`, `roles/cloudkms.admin`, `roles/iam.serviceAccountAdmin`, `roles/iam.serviceAccountUser`, `roles/resourcemanager.projectIamAdmin`, `roles/storage.admin`, `roles/logging.viewer`).
+Grants `DEPLOYER_PRINCIPAL` the least-privilege IAM roles required to provision and verify Stage 2 (`roles/serviceusage.serviceUsageAdmin`, `roles/compute.networkAdmin`, `roles/compute.securityAdmin`, `roles/compute.instanceAdmin.v1`, `roles/iap.tunnelResourceAccessor`, `roles/cloudkms.admin`, `roles/iam.serviceAccountAdmin`, `roles/iam.serviceAccountUser`, `roles/resourcemanager.projectIamAdmin`, `roles/storage.admin`, `roles/logging.viewer`).
 
 ```bash
 ./grant_stage2_iam.sh
