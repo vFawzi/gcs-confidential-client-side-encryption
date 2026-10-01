@@ -48,6 +48,7 @@ gcs-confidential-client-side-encryption/
 ├── cleanup_cse_env.sh               # Stage 1 FinOps infrastructure teardown script
 └── stage2/
     ├── DEPLOYMENT_GUIDE.md          # Stage 2 (Confidential VM OS-Level Agent) operational runbook
+    ├── DEVELOPER_GUIDE.md           # Stage 2 architecture, threat model & POSIX developer guide
     ├── stage2_config.env.example    # Stage 2 sanitized configuration template
     ├── grant_stage2_iam.sh          # Stage 2 least-privilege IAM bootstrap script
     ├── deploy_cse_vm.sh             # Stage 2 automated Confidential VM & FUSE overlay deployment
@@ -74,6 +75,7 @@ gcs-confidential-client-side-encryption/
    cp stage2/stage2_config.env.example stage2/stage2_config.env
    ```
 2. Follow the complete operational lifecycle in the **[Stage 2 Deployment Guide](./stage2/DEPLOYMENT_GUIDE.md)**.
+3. Review the OS-level FUSE overlay architecture, threat model, and POSIX integration patterns in the **[Stage 2 Developer Guide](./stage2/DEVELOPER_GUIDE.md)**.
 
 ---
 
