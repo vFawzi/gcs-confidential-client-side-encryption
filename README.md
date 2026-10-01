@@ -6,7 +6,7 @@
 
 This repository provides production-grade reference architectures and automated deployment suites for implementing **Client-Side Encryption (CSE) inside Hardware-Enforced Trusted Execution Environments (TEEs)** on Google Cloud Platform (GCP).
 
-In regulated enterprise and public-sector environments (such as BIO, PCI DSS v4.0, DORA, and sovereign cloud frameworks), organizations often require cryptographic guarantees that **sensitive data is encrypted before it leaves the compute boundary**—ensuring that the Cloud Storage Layer (`Google Cloud Storage`) only ever receives and stores authenticated ciphertext.
+In regulated enterprise and public-sector environments (such as PCI DSS v4.0, DORA, and sovereign cloud frameworks), organizations often require cryptographic guarantees that **sensitive data is encrypted before it leaves the compute boundary**—ensuring that the Cloud Storage Layer (`Google Cloud Storage`) only ever receives and stores authenticated ciphertext.
 
 By combining **Google Cloud Confidential Computing** (**AMD SEV** hardware memory encryption on `n2d-standard-2` instances with **Shielded VM** `Secure Boot`, `vTPM`, and `Integrity Monitoring`) with client-side cryptographic primitives, this suite protects sensitive workloads across all three data states:
 - **Data in Use:** Protected in RAM via AMD Secure Encrypted Virtualization (SEV) hardware memory encryption.
