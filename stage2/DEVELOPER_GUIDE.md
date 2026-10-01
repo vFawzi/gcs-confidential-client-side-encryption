@@ -1,90 +1,130 @@
-# Stage 2 Developer Guide: Consuming the Transparent POSIX Encryption Mount (`/mnt/gcs_secure`)
+# Stage 2: Client-Side Encryption via Transparent OS-Level Agent
 
-## 1. Developer Experience Overview
+## 1. Architecture Overview
 
-In the Stage 2 architecture (**Transparent OS-Level Agent on Confidential VM**), Client-Side Encryption (CSE) and Google Cloud Storage (GCS) synchronization are enforced transparently at the Linux Virtual File System (VFS) / FUSE layer inside an **AMD SEV Confidential VM** (`n2d-standard-2`).
+The Stage 2 architecture provides **Transparent OS-Level Client-Side Encryption (CSE)** for legacy POSIX applications, commercial off-the-shelf (COTS) software, and high-throughput scientific or industrial binaries that read and write directly to local filesystem paths and cannot be refactored to use cloud storage SDKs or HTTP sidecar proxies.
 
-> **For Infrastructure Engineers:** Looking to provision the Confidential VM, configure IAM, or run the 4-stage verification suite? Refer to the **[Stage 2 Operational Deployment Guide](./DEPLOYMENT_GUIDE.md)**. This guide is strictly for **Application Developers** writing or operating workloads on the Confidential VM.
-
-### Zero Cloud SDKs, Zero Cryptographic Libraries
-As an application developer targeting Stage 2, **your application code must NOT use the Google Cloud Storage SDK** (`google-cloud-storage`, `cloud.google.com/go/storage`, `@google-cloud/storage`) or embed cryptographic libraries (`tink`, `cryptography`, `openssl`).
-
-Instead, your application interacts exclusively with the local POSIX filesystem at **`/mnt/gcs_secure`** using standard OS-level file I/O operations (`open()`, `read()`, `write()`, `fsync()`, `close()`, `rename()`).
+Instead of modifying application code, encryption is enforced transparently at the Linux Virtual File System (VFS) / FUSE layer inside a **Google Cloud Confidential VM** (`n2d-standard-2` backed by **AMD Secure Encrypted Virtualization [SEV]**).
 
 ```
 +---------------------------------------------------------------------------------------+
-| Application Process (Python, C/C++, Go, Java, Bash, or COTS Binary)                   |
-| Standard POSIX Syscalls: open('/mnt/gcs_secure/file.txt', 'w'), write(), read()       |
-+-------------------------------------------+-------------------------------------------+
-                                            | Plaintext POSIX File I/O (In AMD SEV RAM)
+| Confidential VM: cse-confidential-vm (n2d-standard-2 | AMD SEV Hardware RAM Encryption)|
+| Network: Private Subnet (No External IP | IAP SSH Tunnel 35.235.240.0/20 -> tcp:22)   |
+| Identity: cse-vm-sa (Bucket-Scoped roles/storage.objectAdmin)                         |
+|                                                                                       |
+|  +---------------------------------------------------------------------------------+  |
+|  | Legacy POSIX Application / Unmodified COTS Binary                               |  |
+|  | Standard POSIX Syscalls: open(), write(), fsync(), read(), rename()             |  |
+|  +----------------------------------------+----------------------------------------+  |
+|                                           | Plaintext POSIX File I/O                  |
+|                                           v (/mnt/gcs_secure/euv_wafer_recipe.txt)    |
+|  +---------------------------------------------------------------------------------+  |
+|  | Upper Mount: /mnt/gcs_secure (gocryptfs Cryptographic FUSE Overlay)             |  |
+|  | - Intercepts VFS syscalls inside AMD SEV hardware-encrypted RAM                 |  |
+|  | - Content Encryption : AES-256-GCM (4 KB blocks + 16B IV + 16B Auth Tag)        |  |
+|  | - Filename Encryption: AES-256-EME (Wide-Block Cipher + Per-Directory DirIV)    |  |
+|  | - Ephemeral Key      : /run/cse_keys/dek.pass (tmpfs in SEV RAM -> shred -u)    |  |
+|  +----------------------------------------+----------------------------------------+  |
+|                                           | AES-256-GCM Ciphertext + EME Filenames    |
+|                                           v (/mnt/gcs_raw/oX5grluyzVGyQDGhA9c2...)    |
+|  +---------------------------------------------------------------------------------+  |
+|  | Lower Mount: /mnt/gcs_raw (gcsfuse --implicit-dirs)                             |  |
+|  | Translates encrypted FUSE file operations into GCS HTTPS REST API calls         |  |
+|  +----------------------------------------+----------------------------------------+  |
++-------------------------------------------|-------------------------------------------+
+                                            | Private Google Access (TLS 1.3)
                                             v
-+---------------------------------------------------------------------------------------+
-| Upper Mount: /mnt/gcs_secure (gocryptfs FUSE Overlay)  <-- DEVELOPERS READ/WRITE HERE |
-| - Encrypts file contents via AES-256-GCM (4 KB blocks + 16B IV + 16B GCM Auth Tag)    |
-| - Encrypts filenames via AES-256-EME (Wide-Block Cipher + Per-Directory DirIV)        |
-+-------------------------------------------+-------------------------------------------+
-                                            | Ciphertext Blocks + Obfuscated Filenames
-                                            v
-+---------------------------------------------------------------------------------------+
-| Lower Mount: /mnt/gcs_raw (gcsfuse)                    <-- DO NOT TOUCH DIRECTLY      |
-| - Streams encrypted objects over Private Google Access (TLS 1.3) to GCS               |
-+---------------------------------------------------------------------------------------+
+            +---------------------------------------------------------------+
+            | Google Cloud Storage (europe-west4)                           |
+            | Bucket: gs://cse-os-agent-bucket-your-project-id              |
+            | Receives & Stores ONLY Obfuscated Names & AES-256-GCM Blobs   |
+            +---------------------------------------------------------------+
 ```
+
+### How the Stacked FUSE Pipeline Works
+1. **Plaintext Upper Mount (`/mnt/gcs_secure`):** Legacy applications read and write standard files and directories under `/mnt/gcs_secure` using ordinary POSIX file descriptors. The application has zero awareness of cloud storage or cryptography.
+2. **In-Memory Cryptographic Interception (`gocryptfs` in AMD SEV RAM):**
+   - Every write to `/mnt/gcs_secure` is intercepted by the `gocryptfs` FUSE daemon running in **AMD SEV hardware-encrypted memory**.
+   - **File Content Encryption (`AES-256-GCM`):** File payloads are segmented into 4 KB blocks. Each file receives an 18-byte header, and each block is encrypted with a random 128-bit (16-byte) Initialization Vector (IV) and authenticated with a 128-bit (16-byte) Galois/Counter Mode (GCM) integrity tag (adding 50 bytes of cryptographic framing to small single-block files).
+   - **Filename Encryption (`AES-256-EME`):** Filenames are encrypted using **ECB-Mix-ECB (EME)** wide-block encryption combined with a per-directory initialization vector (`gocryptfs.diriv`) and Base64URL-encoded. Plaintext filenames never appear below `/mnt/gcs_secure`.
+3. **Ciphertext Lower Mount (`/mnt/gcs_raw` via `gcsfuse`):**
+   - `gocryptfs` flushes the encrypted blocks and EME-obfuscated filenames into `/mnt/gcs_raw`, which is mounted via `gcsfuse --implicit-dirs -o rw,nodev,nosuid`.
+   - `gcsfuse` streams only the already-encrypted ciphertext objects over Private Google Access (TLS 1.3) to the regional Google Cloud Storage bucket (`gs://cse-os-agent-bucket-your-project-id`).
 
 ---
 
-## 2. Code Samples: Standard OS-Level File I/O on `/mnt/gcs_secure`
+## 2. Threat Model & The "Zero Plaintext to CSP" Guarantee
 
-### 2.1 Python Example (Standard `open()` I/O — No GCS SDK)
+Stage 2 is engineered to enforce a strict **"Zero Plaintext to Cloud Service Provider (CSP)"** security boundary:
 
-Applications use Python's built-in `open()` function targeting `/mnt/gcs_secure`. No GCP credentials, bucket names, or KMS keys are required in application code.
+| Threat Vector | Cryptographic & Architectural Mitigation | Verification Guarantee |
+| :--- | :--- | :--- |
+| **CSP Storage Inspection / Bucket Compromise** | Data and filenames are encrypted inside the VM *before* reaching `gcsfuse`. GCS only receives `AES-256-GCM` ciphertext and `AES-256-EME` obfuscated object names. | Out-of-band `gcloud storage ls` and `gcloud storage cat` queries return zero plaintext filenames and zero cleartext payload bytes. |
+| **Hypervisor / Host RAM Scraping (Data in Use)** | The VM runs on an `n2d-standard-2` Confidential VM with **AMD SEV** (`--confidential-compute-type=SEV`). DRAM pages (including Linux page cache, FUSE buffers, and key material) are encrypted with a hardware key locked inside the AMD Secure Processor. | Host hypervisor cannot read guest memory pages or extract the active `gocryptfs` master key from RAM. |
+| **Persistent Boot Disk Forensics (Key at Rest)** | During `/usr/local/sbin/cse-mount-overlay.sh`, the Data Encryption Key (DEK) is staged exclusively in a 16 MB RAM-backed `tmpfs` mount (`/run/cse_keys/dek.pass`, `mode=0400`) and immediately overwritten and unlinked via `shred -u` once `gocryptfs` mounts. | The raw DEK is never written to the persistent boot disk (`pd-balanced`), and `/run/cse_keys/dek.pass` does not exist on the filesystem post-mount. |
+| **Ciphertext Tampering / Bit-Rot in GCS** | Every 4 KB ciphertext block carries a 16-byte `AES-256-GCM` authentication tag, and filenames are bound to their parent directory via `gocryptfs.diriv`. | Any unauthorized bit modification in GCS causes `gocryptfs` to immediately reject the read with an `EIO` (Input/Output Error) rather than returning corrupted plaintext. |
+| **Unauthorized Network Ingress / Lateral Movement** | The Confidential VM is deployed with `--no-address` (zero public IP) and Shielded VM (`Secure Boot`, `vTPM`, `Integrity Monitoring`). Administrative access is restricted to **Identity-Aware Proxy (IAP)** TCP forwarding (`35.235.240.0/20` $\rightarrow$ `tcp:22`). | Zero public attack surface; all administrative SSH commands are authenticated and audited via Google Cloud IAP. |
+
+---
+
+## 3. FAQ: Why FUSE instead of STET?
+
+A common architectural question when evaluating Client-Side Encryption (CSE) patterns on Google Cloud is: **Why does Stage 2 use a stacked FUSE overlay (`gocryptfs` + `gcsfuse`) when our CI/CD guidelines mandate the Split-Trust Encryption Tool (`stet`)?**
+
+The answer lies in the fundamental difference between **Long-Running Application Runtimes** and **Ephemeral CI/CD Pipelines**:
+
+| Architectural Dimension | Stage 2: Stacked FUSE (`gocryptfs` + `gcsfuse`) | CI/CD Pattern: Split-Trust Encryption Tool (`stet`) |
+| :--- | :--- | :--- |
+| **Target Environment** | **Long-Running, Stateful Legacy Application Runtimes** on dedicated Confidential VMs (`n2d-standard-2` AMD SEV). | **Ephemeral, Stateless CI/CD Runners** (Google Cloud Build, GitHub Actions, GitLab CI). |
+| **Workload I/O Profile** | **Interactive POSIX File System I/O:** Applications hard-require a mounted POSIX directory (`/mnt/gcs_secure`) supporting `open()`, `read()`, `write()`, `lseek()`, `fsync()`, and directory traversal without code changes. | **Single-Pass Artifact Streaming:** Pipelines package discrete build artifacts (`build_artifact.zip`, container tarballs, ML weights, logs) and stream them once to GCS. |
+| **Privilege & Isolation Model** | Runs inside a dedicated, single-tenant Confidential VM where mounting `/dev/fuse` in guest kernel space is isolated by AMD SEV hardware virtual machine boundaries. | Runs in unprivileged user space without `/dev/fuse` or `CAP_SYS_ADMIN`. **Mounting FUSE inside CI/CD containers is a security and operational anti-pattern.** |
+| **Lifecycle & Flush Semantics** | Persistent daemon lifecycle managed by systemd/startup scripts over days or months, with explicit `fsync()` durability across ongoing POSIX operations. | Stateless single-command CLI pipe (`./stet encrypt ... \| gsutil cp - gs://...`) that eliminates background FUSE unmount race conditions before container exit. |
+
+### Key Takeaway
+- **Use Stage 2 (`gocryptfs` + `gcsfuse`)** exclusively for **long-running legacy POSIX applications and COTS binaries** executing inside a Confidential VM that require a live local filesystem mount (`/mnt/gcs_secure`).
+- **Use `stet` (Split-Trust Encryption Tool)** exclusively for **ephemeral CI/CD pipelines and batch automation jobs**. Never mount FUSE inside short-lived CI/CD runners. For complete CI/CD pipeline examples, see the **[CI/CD Integration Guide](../cicd/CICD_INTEGRATION_GUIDE.md)**.
+
+---
+
+## 4. Developer Experience: Consuming `/mnt/gcs_secure` in POSIX Applications
+
+In Stage 2, applications **do NOT use the Google Cloud Storage SDK** (`google-cloud-storage`) or cryptographic libraries (`tink`). Instead, they use standard OS-level file I/O operations directly on `/mnt/gcs_secure`.
+
+### 4.1 Python POSIX File I/O Example (Standard `open()`)
 
 ```python
 import os
 from pathlib import Path
 from typing import Final
 
-SECURE_MOUNT_PATH: Final[Path] = Path(os.environ.get("GCS_SECURE_MOUNT", "/mnt/gcs_secure"))
+SECURE_MOUNT_DIR: Final[Path] = Path(os.environ.get("GCS_SECURE_MOUNT", "/mnt/gcs_secure"))
 
 
-def write_encrypted_file(relative_filename: str, content: str) -> Path:
-    """Writes plaintext text to /mnt/gcs_secure using standard POSIX file I/O."""
-    if not SECURE_MOUNT_PATH.is_mount():
-        raise OSError(f"Cryptographic mount {SECURE_MOUNT_PATH} is not active.")
+def write_confidential_record(filename: str, payload: str) -> Path:
+    """Writes plaintext to /mnt/gcs_secure; flushed to GCS as AES-256-GCM ciphertext."""
+    if not SECURE_MOUNT_DIR.is_mount():
+        raise RuntimeError(f"Secure CSE overlay is not mounted at {SECURE_MOUNT_DIR}")
 
-    target_file: Path = SECURE_MOUNT_PATH / relative_filename
-    target_file.parent.mkdir(parents=True, exist_ok=True)
+    target_path: Path = SECURE_MOUNT_DIR / filename
+    with open(target_path, "w", encoding="utf-8") as fh:
+        fh.write(payload)
+        fh.flush()
+        os.fsync(fh.fileno())  # Ensures gcsfuse flushes the encrypted object to GCS
 
-    try:
-        with open(target_file, "w", encoding="utf-8") as file_handle:
-            file_handle.write(content)
-            file_handle.flush()
-            os.fsync(file_handle.fileno())
-    except OSError as exc:
-        raise RuntimeError(f"Failed to write to secure mount path {target_file}: {exc}") from exc
-
-    return target_file
+    return target_path
 
 
-def read_decrypted_file(relative_filename: str) -> str:
+def read_confidential_record(filename: str) -> str:
     """Reads and transparently decrypts a file from /mnt/gcs_secure."""
-    target_file: Path = SECURE_MOUNT_PATH / relative_filename
-
-    try:
-        with open(target_file, "r", encoding="utf-8") as file_handle:
-            return file_handle.read()
-    except FileNotFoundError as exc:
-        raise FileNotFoundError(f"Encrypted file not found at {target_file}") from exc
-    except OSError as exc:
-        raise RuntimeError(
-            f"I/O or GCM authentication error reading {target_file}: {exc}"
-        ) from exc
+    target_path: Path = SECURE_MOUNT_DIR / filename
+    with open(target_path, "r", encoding="utf-8") as fh:
+        return fh.read()
 
 
 if __name__ == "__main__":
-    # Simple one-liner usage with standard Python file I/O:
+    # Direct standard Python file I/O on /mnt/gcs_secure:
     with open("/mnt/gcs_secure/file.txt", "w", encoding="utf-8") as f:
-        f.write("CONFIDENTIAL_LITHOGRAPHY_CALIBRATION_VECTOR_9042\n")
+        f.write("CONFIDENTIAL_STAGE2_OS_AGENT_PAYLOAD_9042\n")
         f.flush()
         os.fsync(f.fileno())
 
@@ -92,72 +132,113 @@ if __name__ == "__main__":
         print(f"Decrypted content: {f.read().strip()}")
 ```
 
-### 2.2 Bash / Shell Script Example
-
-Legacy scripts, cron jobs, and COTS wrappers can read and write directly to `/mnt/gcs_secure` using standard POSIX utilities (`cat`, `tee`, `cp`, `dd`, `sync`):
+### 4.2 Bash POSIX File I/O Example
 
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
 
-SECURE_DIR="/mnt/gcs_secure"
-TARGET_FILE="${SECURE_DIR}/file.txt"
+# Verify /mnt/gcs_secure is mounted, write plaintext, flush via sync, and read back
+mountpoint -q /mnt/gcs_secure
+printf 'CONFIDENTIAL_STAGE2_OS_AGENT_PAYLOAD_9042\n' > /mnt/gcs_secure/file.txt
+sync /mnt/gcs_secure/file.txt
+cat /mnt/gcs_secure/file.txt
+```
 
-# Verify the cryptographic FUSE overlay is mounted before writing
-if ! mountpoint -q "${SECURE_DIR}"; then
-  echo "ERROR: ${SECURE_DIR} is not mounted. Aborting to prevent unencrypted local writes." >&2
-  exit 1
-fi
+### 4.3 Filesystem Constraints & Debugging (`/mnt/gcs_raw` vs. `/mnt/gcs_secure`)
+- **AES-EME Filename Length Constraint:** Filenames in `/mnt/gcs_secure` are encrypted via **AES-256-EME** (padded to 16-byte AES blocks) and **Base64URL-encoded** (~33% expansion). Because Linux enforces a 255-byte `NAME_MAX` limit on the encrypted filename in `/mnt/gcs_raw`, developers must **avoid extremely long filenames approaching 255 bytes** (keep plaintext filenames under ~175 bytes to prevent `ENAMETOOLONG` errors).
+- **Debugging `/mnt/gcs_raw`:** If a developer inspects `/mnt/gcs_raw`, they will **never** see plaintext filenames or cleartext content. They will only see `gocryptfs.conf` (wrapped master key metadata), `gocryptfs.diriv` (16-byte per-directory IV), and Base64URL-encoded `AES-256-EME` filenames containing raw binary `AES-256-GCM` ciphertext. **Never modify or delete files directly in `/mnt/gcs_raw`.**
 
-# 1. Write plaintext directly to /mnt/gcs_secure (transparently encrypted via AES-256-GCM)
-printf 'CONFIDENTIAL_WAFER_BATCH_TELEMETRY_9042\n' > "${TARGET_FILE}"
+---
 
-# 2. Flush kernel page cache so gcsfuse finalizes the ciphertext object in GCS
-sync "${TARGET_FILE}"
+## 5. Prerequisites & Configuration
 
-# 3. Read back and transparently decrypt from /mnt/gcs_secure
-DECRYPTED_CONTENT="$(cat "${TARGET_FILE}")"
-echo "Read back from ${TARGET_FILE}: ${DECRYPTED_CONTENT}"
+### 5.1 Prerequisites
+1. **Google Cloud SDK (`gcloud`):** Installed and authenticated (`gcloud auth login`), with an SSH client available for IAP tunneling (`gcloud compute ssh --tunnel-through-iap`).
+2. **Target GCP Project:** A Google Cloud project with billing enabled (e.g., `your-project-id`) and quota for `n2d-standard-2` Confidential Computing instances in `europe-west4`.
+3. **IAM Administrator Privileges:** Required for Step 1 (`./grant_stage2_iam.sh`) to grant least-privilege deployment roles to your `DEPLOYER_PRINCIPAL` (and `./revoke_stage2_iam.sh` to strip them post-deployment).
+
+### 5.2 Configuration (`stage2_config.env.example` $\rightarrow$ `stage2_config.env`)
+
+Navigate to `v2/stage2/` and copy the sanitized template `stage2_config.env.example` to `stage2_config.env`:
+
+```bash
+cd stage2 && cp stage2_config.env.example stage2_config.env && chmod +x *.sh *.env
+```
+
+Edit `stage2_config.env` and populate your target `PROJECT_ID` and `DEPLOYER_PRINCIPAL`:
+
+```bash
+export PROJECT_ID="your-project-id"
+export REGION="europe-west4"
+export ZONE="europe-west4-a"
+export DEPLOYER_PRINCIPAL="user:user@example.com"
+
+export VPC_NETWORK="test"
+export VPC_SUBNET="nl"
+export VPC_SUBNET_CIDR="10.0.0.0/24"
+export CLOUD_ROUTER_NAME="${VPC_NETWORK}-nat-router"
+export CLOUD_NAT_NAME="${VPC_NETWORK}-nat-gateway"
+
+export KMS_KEY_RING="cse-keyring-mvp"
+export KMS_CRYPTO_KEY="cse-proxy-key"
+export KMS_KEY_URI="gcp-kms://projects/${PROJECT_ID}/locations/${REGION}/keyRings/${KMS_KEY_RING}/cryptoKeys/${KMS_CRYPTO_KEY}"
+
+export VM_NAME="cse-confidential-vm"
+export VM_SA_NAME="cse-vm-sa"
+export VM_SA_EMAIL="${VM_SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+export STAGE2_BUCKET_NAME="cse-os-agent-bucket-${PROJECT_ID}"
+export GCS_RAW_MOUNT="/mnt/gcs_raw"
+export GCS_SECURE_MOUNT="/mnt/gcs_secure"
+export IAP_FIREWALL_RULE="allow-iap-ssh-cse-vm"
+export IAP_NETWORK_TAG="cse-iap-ssh"
 ```
 
 ---
 
-## 3. Filesystem Constraints & Operational Behavior
+## 6. Execution Lifecycle
 
-### 3.1 Filename Length Limit (`AES-256-EME` Overhead)
-Every file and directory name created inside `/mnt/gcs_secure` is encrypted by `gocryptfs` using **AES-256-EME (ECB-Mix-ECB wide-block encryption)** combined with a per-directory initialization vector (`gocryptfs.diriv`) and **Base64URL-encoded** before being written to `/mnt/gcs_raw`.
+Execute the following lifecycle phases in order from the `v2/stage2/` directory:
 
-- **Byte Expansion Overhead:** AES-EME pads plaintext filenames to a 16-byte AES block boundary, and Base64URL encoding expands the resulting binary ciphertext by **~33%** (`4/3` ratio).
-- **Avoid Long Filenames Approaching 255 Bytes:** Because the lower POSIX mount (`/mnt/gcs_raw`) enforces the standard Linux `NAME_MAX` limit of **255 bytes** for encrypted filenames, **plaintext filenames in `/mnt/gcs_secure` must not exceed ~175 bytes** (and developers should stay well below 150 characters as a safe engineering margin).
-- **Failure Mode:** Attempting to create a file with a plaintext name approaching 255 bytes will raise `OSError: [Errno 36] File name too long` (`ENAMETOOLONG`).
+### 6.1 IAM Bootstrap (`./grant_stage2_iam.sh`)
 
-### 3.2 `fsync()` and Close-to-Open Flush Semantics
-Because the lower layer (`/mnt/gcs_raw`) is backed by `gcsfuse`, Google Cloud Storage objects are finalized and uploaded only when the file descriptor is flushed and closed (`fsync()` / `close()`).
-- Always call `os.fsync(fd)` in Python (or `sync` in Bash) after completing critical writes to ensure the encrypted payload is durably persisted to the GCS bucket before your process exits.
-- Avoid high-frequency, single-byte random in-place file mutations; prefer streaming sequential writes or writing a complete temporary file and atomically renaming it (`os.replace()`) within `/mnt/gcs_secure`.
+Grants `DEPLOYER_PRINCIPAL` the least-privilege IAM roles required to provision and verify Stage 2 (`roles/serviceusage.serviceUsageAdmin`, `roles/compute.networkAdmin`, `roles/compute.instanceAdmin.v1`, `roles/iap.tunnelResourceAccessor`, `roles/cloudkms.admin`, `roles/iam.serviceAccountAdmin`, `roles/iam.serviceAccountUser`, `roles/resourcemanager.projectIamAdmin`, `roles/storage.admin`, `roles/logging.viewer`).
 
-### 3.3 Mount Point Guardrails (`mountpoint` Check)
-Applications should verify that `/mnt/gcs_secure` is an active mount point (`Path("/mnt/gcs_secure").is_mount()` in Python or `mountpoint -q /mnt/gcs_secure` in Bash) before writing sensitive data. If the FUSE overlay is unmounted, writing to `/mnt/gcs_secure` would otherwise fail or write to the root disk depending on directory permissions.
+```bash
+./grant_stage2_iam.sh
+```
 
----
+### 6.2 Infrastructure Deployment (`./deploy_cse_vm.sh`)
 
-## 4. Debugging & Inspecting `/mnt/gcs_raw` vs. `/mnt/gcs_secure`
+Provisions the Stage 2 Confidential VM environment:
+- Enables required Google Cloud APIs (`compute`, `iam`, `cloudkms`, `storage`, `iap`, `logging`, `monitoring`).
+- Verifies or creates the custom VPC (`test`), Private Google Access subnet (`nl`), Cloud Router/NAT, and IAP SSH ingress firewall rule (`allow-iap-ssh-cse-vm`).
+- Verifies or creates the Cloud KMS key and regional ciphertext GCS bucket (`gs://cse-os-agent-bucket-your-project-id`) with Uniform Bucket-Level Access and Public Access Prevention.
+- Creates the dedicated VM Service Account (`cse-vm-sa`) with bucket-scoped `roles/storage.objectAdmin` and key-scoped `roles/cloudkms.cryptoKeyEncrypterDecrypter`.
+- Launches the AMD SEV Confidential VM (`cse-confidential-vm`), installs `gcsfuse` and `gocryptfs`, executes `/usr/local/sbin/cse-mount-overlay.sh`, and shreds the ephemeral DEK from `tmpfs`.
 
-When troubleshooting on the Confidential VM, understanding the distinction between the upper mount (`/mnt/gcs_secure`) and the lower mount (`/mnt/gcs_raw`) is essential:
+```bash
+./deploy_cse_vm.sh
+```
 
-| Mount Path | Layer Role | What You See (`ls -la` / `cat`) | Developer Rule |
-| :--- | :--- | :--- | :--- |
-| **`/mnt/gcs_secure`** | **Upper Mount (`gocryptfs`)** | Plaintext filenames (`file.txt`) and decrypted file contents. | **Read and write all application files here.** |
-| **`/mnt/gcs_raw`** | **Lower Mount (`gcsfuse`)** | Base64URL `AES-256-EME` obfuscated filenames, binary `AES-256-GCM` ciphertext, and `gocryptfs` metadata files. | **Read-only inspection for debugging ONLY. NEVER modify or delete files here.** |
+### 6.3 Threat Model Validation (`./test_cse_vm.sh`)
 
-### What You Will See Inside `/mnt/gcs_raw`
-If you run `ls -la /mnt/gcs_raw` during debugging, **you will never see `file.txt` or any plaintext data**. Instead, you will observe:
+Executes the automated **4-Stage Zero-Plaintext Verification Protocol**:
+1. **Stage 1 — Legacy POSIX Write Simulation (In-VM via IAP SSH):** Writes `CONFIDENTIAL_STAGE2_OS_AGENT_PAYLOAD_9042` to `/mnt/gcs_secure/euv_wafer_recipe_secret.txt`, calls `sync`, and verifies local decrypted readback.
+2. **Stage 2 — Lower-Mount Ciphertext & Filename Inspection (In-VM `/mnt/gcs_raw`):** Confirms the plaintext filename is absent in `/mnt/gcs_raw`, verifies `gocryptfs.conf` and `gocryptfs.diriv`, and captures the `AES-256-EME` encrypted filename.
+3. **Stage 3 — Out-of-Band CSP Zero-Plaintext Audit (External Runner $\rightarrow$ GCS Directly):** Queries `gs://cse-os-agent-bucket-your-project-id/` directly via `gcloud storage ls` and `gcloud storage cat` outside the VM, confirming zero plaintext filename leakage and verifying the 50-byte `gocryptfs` `AES-256-GCM` framing with zero cleartext matches.
+4. **Stage 4 — Cold Unmount, Ephemeral Key Shred Verification & Remount:** Unmounts both layers via `fusermount3 -u`, verifies `/run/cse_keys/dek.pass` was shredded from `tmpfs`, re-runs `/usr/local/sbin/cse-mount-overlay.sh`, verifies post-remount key shredding, and confirms intact plaintext decryption.
 
-1. **`gocryptfs.conf`:** The filesystem configuration header located at the root of `/mnt/gcs_raw` containing the encrypted master key blob wrapped by the ephemeral key.
-2. **`gocryptfs.diriv`:** A 16-byte per-directory Initialization Vector file present in `/mnt/gcs_raw` and every subdirectory. It ensures that two files with the exact same plaintext name in different directories produce completely different encrypted filenames.
-3. **Encrypted Filename Blobs (e.g., `oX5grluyzVGyQDGhA9c2qjGOy10WjRbZPduw5DNDi_E`):** Each application file appears as an opaque Base64URL string. Inspecting its contents (`cat` or `xxd`) reveals raw binary `AES-256-GCM` ciphertext (which is exactly 50 bytes larger than a small single-block plaintext file due to the 18-byte `gocryptfs` header, 16-byte block IV, and 16-byte GCM authentication tag).
+```bash
+./test_cse_vm.sh
+```
 
-### Diagnosing Integrity Errors (`EIO` / `Input/output error`)
-If reading a file from `/mnt/gcs_secure` fails with `Errno 5 (Input/output error / EIO)`:
-- **Cause:** `gocryptfs` detected that the underlying ciphertext block or GCM authentication tag in Google Cloud Storage (visible via `/mnt/gcs_raw`) was modified, truncated, or corrupted out-of-band.
-- **Security Guarantee:** By design, `gocryptfs` refuses to return unauthenticated or tampered bytes to the application process.
+### 6.4 FinOps Infrastructure Teardown (`./cleanup_stage2.sh`)
+
+Destroys all Stage 2 resources (`cse-confidential-vm`, `allow-iap-ssh-cse-vm` firewall rule, `gs://cse-os-agent-bucket-your-project-id` bucket and objects, and `cse-vm-sa` Service Account) to prevent ongoing compute or storage charges.
+
+```bash
+./cleanup_stage2.sh
+```
+
+> **Post-Deployment Hardening:** To strip the deployer principal of elevated permissions after deployment or teardown (enforcing Zero Standing Privileges), execute `./revoke_stage2_iam.sh`.
