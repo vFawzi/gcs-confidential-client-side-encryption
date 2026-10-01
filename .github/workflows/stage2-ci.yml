@@ -1,7 +1,7 @@
 name: Stage 2 Confidential VM CSE E2E Validation
 
 on:
-  push:
+  pull_request:
     branches:
       - main
   workflow_dispatch:
