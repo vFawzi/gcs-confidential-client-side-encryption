@@ -1,17 +1,17 @@
 # CI/CD Integration: Client-Side Encryption for Automated Pipelines
 
-## 1. Architecture: Why Ephemeral CI/CD Pipelines Use STET Instead of FUSE
+## 1. Ephemeral Artifact Encryption: Why Pipelines Use STET Instead of FUSE
 
-While persistent compute workloads on Google Cloud use either the **Stage 1 HTTP Sidecar Proxy** (Confidential GKE) or the **Stage 2 Transparent OS-Level FUSE Agent** (`gocryptfs` + `gcsfuse` on Confidential VMs), **ephemeral CI/CD runners** (such as **Google Cloud Build**, **GitHub Actions**, and **GitLab CI**) have a fundamentally different execution model.
+While persistent compute workloads on Google Cloud use either the **Stage 1 HTTP Sidecar Proxy** (Confidential GKE) or the **Stage 2 Transparent OS-Level FUSE Agent** (`gocryptfs` + `gcsfuse` on Confidential VMs), **ephemeral CI/CD runners** (such as **Google Cloud Build**, **GitHub Actions**, and **GitLab CI**) have a fundamentally different execution model when encrypting build artifacts directly inside the runner.
 
-### Why Mounting FUSE in CI/CD is an Anti-Pattern
-Attempting to mount OS-level FUSE filesystems (`gcsfuse` + `gocryptfs`) inside automated CI/CD steps is an architectural and security anti-pattern:
+### Why Mounting FUSE in CI/CD Runners is an Anti-Pattern
+Attempting to mount OS-level FUSE filesystems (`gcsfuse` + `gocryptfs`) inside automated CI/CD containers is an architectural and security anti-pattern:
 1. **Container Privilege Escalation Risk:** Mounting FUSE inside containerized CI/CD steps requires elevated Linux capabilities (`CAP_SYS_ADMIN`) and host device passthrough (`/dev/fuse`), violating least-privilege container isolation in shared or ephemeral runners.
 2. **Ephemeral Lifecycle & Teardown Race Conditions:** CI/CD build steps are short-lived and stateless. Background FUSE daemons risk premature container termination before asynchronous kernel page-cache flushes (`fsync`) complete, leading to truncated or corrupted artifacts in Google Cloud Storage (GCS).
 3. **Batch Artifact Workload Profile:** CI/CD pipelines do not perform random POSIX file I/O; they produce discrete, immutable build artifacts (compiled binaries, container tarballs, ML model weights, SBOMs, and compliance logs) that are encrypted once and streamed directly to object storage.
 
-### The Recommended Pattern: Split-Trust Encryption Tool (STET)
-For automated pipelines, use Google's open-source **Split-Trust Encryption Tool (`stet`)** CLI. `stet` performs **Client-Side Envelope Encryption** (`AES-256-GCM` Data Encryption Key generated in runner memory and wrapped via Google Cloud KMS) in a single, unprivileged user-space command—streaming ciphertext directly into `gsutil` or `gcloud storage` without writing intermediate ciphertext files or mounting FUSE filesystems.
+### The Recommended Pattern for Build Artifacts: Split-Trust Encryption Tool (STET)
+For encrypting build outputs inside automated pipelines, use Google's open-source **Split-Trust Encryption Tool (`stet`)** CLI. `stet` performs **Client-Side Envelope Encryption** (`AES-256-GCM` Data Encryption Key generated in runner memory and wrapped via Google Cloud KMS) in a single, unprivileged user-space command—streaming ciphertext directly into `gsutil` or `gcloud storage` without writing intermediate ciphertext files or mounting FUSE filesystems.
 
 ```
 +---------------------------------------------------------------------------------------+
@@ -40,9 +40,9 @@ For automated pipelines, use Google's open-source **Split-Trust Encryption Tool 
 
 ---
 
-## 2. IAM Requirements (Least Privilege)
+## 2. IAM Requirements for STET Artifact Encryption
 
-Following the **Principle of Least Privilege**, the dedicated CI/CD Service Account (e.g., `cse-cicd-sa@${PROJECT_ID}.iam.gserviceaccount.com` authenticated via **Workload Identity Federation** or attached to a private **Google Cloud Build** worker pool) requires only two resource-scoped IAM roles:
+Following the **Principle of Least Privilege**, a CI/CD Service Account encrypting build artifacts via `stet` requires only two resource-scoped IAM roles:
 
 | IAM Role | Scope Boundary | Purpose |
 | :--- | :--- | :--- |
@@ -50,8 +50,6 @@ Following the **Principle of Least Privilege**, the dedicated CI/CD Service Acco
 | **`roles/storage.objectAdmin`** | **Bucket-Scoped:** `gs://${BUCKET_NAME}` | Allows the CI/CD runner to stream encrypted build artifacts (`*.enc`) to and from the target regional GCS bucket. |
 
 ### Granting Scoped IAM Bindings (Single-Line Commands)
-
-Execute the following single-line commands to bind the required permissions to your CI/CD Service Account without granting broad project-wide roles:
 
 ```bash
 gcloud kms keys add-iam-policy-binding cse-proxy-key --keyring="cse-keyring-mvp" --location="europe-west4" --project="${PROJECT_ID}" --member="serviceAccount:cse-cicd-sa@${PROJECT_ID}.iam.gserviceaccount.com" --role="roles/cloudkms.cryptoKeyEncrypterDecrypter"
@@ -80,8 +78,6 @@ decrypt_config:
 ```
 
 ### 3.2 Generic CI/CD Pipeline Step (YAML)
-
-Below is a portable CI/CD pipeline configuration (shown for **Google Cloud Build** and easily adaptable to **GitHub Actions** / **GitLab CI**) that downloads the `stet` binary, generates `kms-config.yaml`, encrypts `build_artifact.zip` in memory, and pipes the ciphertext directly to Google Cloud Storage:
 
 ```yaml
 # cloudbuild.yaml — Ephemeral CI/CD Client-Side Encryption via STET
@@ -124,14 +120,87 @@ options:
 
 ### 3.3 Core One-Line Command Reference
 
-To encrypt `build_artifact.zip` on the fly and stream the resulting ciphertext directly to Google Cloud Storage inside any CI/CD shell runner:
+To encrypt `build_artifact.zip` on the fly and stream the resulting ciphertext directly to Google Cloud Storage:
 
 ```bash
 ./stet encrypt --config=kms-config.yaml --input=build_artifact.zip | gsutil cp - gs://$BUCKET_NAME/build_artifact.enc
 ```
 
-To download and decrypt `build_artifact.enc` in a downstream deployment pipeline stage:
+---
 
-```bash
-gsutil cp gs://$BUCKET_NAME/build_artifact.enc - | ./stet decrypt --config=kms-config.yaml --input=- --output=build_artifact.zip
+## 4. Automated Stage 2 E2E Validation via GitHub Actions & Workload Identity Federation (WIF)
+
+In addition to encrypting build artifacts with `stet`, this repository includes a continuous verification workflow (**[`.github/workflows/stage2-ci.yml`](../.github/workflows/stage2-ci.yml)**) that automatically provisions the **Stage 2 Confidential VM (`n2d-standard-2` AMD SEV)**, executes the **4-Stage Zero-Plaintext Verification Protocol**, and tears down all ephemeral infrastructure on every push to `main` (or manual `workflow_dispatch`).
+
+### 4.1 Keyless Authentication Architecture (Workload Identity Federation)
+
+To eliminate long-lived Google Cloud Service Account JSON keys, the GitHub Actions pipeline authenticates using **Google Cloud Workload Identity Federation (WIF)** over OpenID Connect (OIDC):
+
 ```
++---------------------------------------------------------------------------------------+
+| GitHub Actions Runner (.github/workflows/stage2-ci.yml)                               |
+| Permissions: id-token: write, contents: read                                          |
+|                                                                                       |
+|  1. Requests OIDC JWT from https://token.actions.githubusercontent.com                |
+|     (Claims: sub="repo:vFawzi/gcs-confidential-client-side-encryption:...",           |
+|              repository="vFawzi/gcs-confidential-client-side-encryption")             |
++-------------------------------------------+-------------------------------------------+
+                                            | OIDC JWT Assertion (HTTPS TLS 1.3)
+                                            v
++---------------------------------------------------------------------------------------+
+| Google Cloud Security Token Service (STS) & Workload Identity Pool                    |
+| Pool     : github-actions-pool (global)                                               |
+| Provider : github-oidc-provider (Issuer: https://token.actions.githubusercontent.com) |
+| Mapping  : google.subject=assertion.sub, attribute.repository=assertion.repository    |
+| Condition: assertion.repository == '${GITHUB_REPO}'                                   |
++-------------------------------------------+-------------------------------------------+
+                                            | Impersonates via roles/iam.workloadIdentityUser
+                                            v
++---------------------------------------------------------------------------------------+
+| Dedicated CI/CD Service Account: cse-github-ci-sa@${PROJECT_ID}.iam.gserviceaccount.com|
+| Executes:                                                                             |
+|  - ./deploy_cse_vm.sh  (Provisions Confidential VM + gocryptfs/gcsfuse overlay)       |
+|  - ./test_cse_vm.sh    (Runs 4-Stage Zero-Plaintext Verification Protocol)            |
+|  - ./cleanup_stage2.sh (Always runs via `if: always()` to prevent orphaned VM spend)  |
++---------------------------------------------------------------------------------------+
+```
+
+### 4.2 Step 1: Run the One-Time WIF Bootstrap Script (`setup_github_wif.sh`)
+
+> **IMPORTANT:** You **must** run [`stage2/setup_github_wif.sh`](../stage2/setup_github_wif.sh) **once** as a Project or Organization IAM Administrator before triggering the GitHub Actions pipeline.
+
+1. Ensure `stage2/stage2_config.env` exists and defines your target `PROJECT_ID` (e.g., `cloud-cse-002`) and `GITHUB_REPO` (e.g., `vFawzi/gcs-confidential-client-side-encryption`):
+   ```bash
+   cd stage2 && cp stage2_config.env.example stage2_config.env && chmod +x *.sh *.env
+   ```
+2. Edit `stage2/stage2_config.env` to set `PROJECT_ID="cloud-cse-002"` and `GITHUB_REPO="vFawzi/gcs-confidential-client-side-encryption"`.
+3. Execute the WIF bootstrap script from the `stage2/` directory:
+   ```bash
+   ./setup_github_wif.sh
+   ```
+
+What `setup_github_wif.sh` provisions automatically:
+- Creates the dedicated CI/CD Service Account (`cse-github-ci-sa@${PROJECT_ID}.iam.gserviceaccount.com`) and grants it the exact Stage 2 deployment roles defined in [`grant_stage2_iam.sh`](../stage2/grant_stage2_iam.sh).
+- Creates the Workload Identity Pool (`github-actions-pool`) and OIDC Provider (`github-oidc-provider`) for `https://token.actions.githubusercontent.com` with attribute mapping `google.subject=assertion.sub,attribute.repository=assertion.repository`.
+- Binds `roles/iam.workloadIdentityUser` on `cse-github-ci-sa` strictly to `principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/github-actions-pool/attribute.repository/${GITHUB_REPO}`.
+- Outputs the exact `WIF_PROVIDER` and `CI_SA_EMAIL` strings required for GitHub Repository Secrets.
+
+### 4.3 Step 2: Configure GitHub Repository Secrets in the GitHub UI
+
+After running `./setup_github_wif.sh`, copy the two output values printed in your terminal and add them to your GitHub repository:
+
+1. Open your GitHub repository in a browser (`https://github.com/<owner>/gcs-confidential-client-side-encryption`).
+2. Navigate to **Settings** $\rightarrow$ **Secrets and variables** $\rightarrow$ **Actions** in the left sidebar.
+3. Click **New repository secret** and add the following two secrets:
+
+| Secret Name | Value Format (Copy from `./setup_github_wif.sh` Output) | Example Value (`cloud-cse-002`) |
+| :--- | :--- | :--- |
+| **`WIF_PROVIDER`** | `projects/<PROJECT_NUMBER>/locations/global/workloadIdentityPools/github-actions-pool/providers/github-oidc-provider` | `projects/123456789012/locations/global/workloadIdentityPools/github-actions-pool/providers/github-oidc-provider` |
+| **`CI_SA_EMAIL`** | `cse-github-ci-sa@<PROJECT_ID>.iam.gserviceaccount.com` | `cse-github-ci-sa@cloud-cse-002.iam.gserviceaccount.com` |
+
+### 4.4 Step 3: Triggering & Monitoring the Pipeline
+
+Once the `WIF_PROVIDER` and `CI_SA_EMAIL` secrets are saved in GitHub:
+- **Automatic Trigger:** Any `git push origin main` will automatically trigger the **`Stage 2 Confidential VM CSE E2E Validation`** workflow.
+- **Manual Trigger:** In the GitHub UI, navigate to **Actions** $\rightarrow$ **Stage 2 Confidential VM CSE E2E Validation** $\rightarrow$ **Run workflow** (`workflow_dispatch`).
+- **FinOps Guarantee (`if: always()`):** The final step (`Teardown Stage 2 Infrastructure`) is configured with `if: always()`, guaranteeing that `./cleanup_stage2.sh` destroys the Confidential VM, IAP firewall rule, Stage 2 GCS bucket, and `cse-vm-sa` Service Account even if an earlier deployment or test assertion fails.

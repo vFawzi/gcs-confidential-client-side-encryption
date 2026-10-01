@@ -1,0 +1,67 @@
+name: Stage 2 Confidential VM CSE E2E Validation
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  CLOUDSDK_CORE_DISABLE_PROMPTS: "1"
+
+jobs:
+  validate-stage2-os-agent:
+    name: Deploy, Verify & Teardown Stage 2 Confidential VM
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud via Workload Identity Federation
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.CI_SA_EMAIL }}
+
+      - name: Set up Google Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Prepare Runner Environment & Stage 2 Configuration
+        env:
+          CI_SA_EMAIL: ${{ secrets.CI_SA_EMAIL }}
+        run: |
+          set -euo pipefail
+          # Support 'cd v2/stage2' regardless of whether repo root is checked out directly
+          if [[ ! -d "v2/stage2" && -d "stage2" ]]; then
+            ln -sfn . v2
+          fi
+          # Pre-generate non-interactive GCE SSH keypair for IAP SSH tunneling
+          mkdir -p "${HOME}/.ssh"
+          if [[ ! -f "${HOME}/.ssh/google_compute_engine" ]]; then
+            ssh-keygen -t rsa -b 3072 -f "${HOME}/.ssh/google_compute_engine" -N "" -q
+          fi
+          # Materialize stage2_config.env from sanitized template if not present
+          if [[ ! -f "v2/stage2/stage2_config.env" ]]; then
+            DERIVED_PROJECT_ID="$(echo "${CI_SA_EMAIL}" | sed -E 's/^[^@]+@([^.]+)\.iam\.gserviceaccount\.com$/\1/')"
+            TARGET_PROJECT_ID="${DERIVED_PROJECT_ID:-cloud-cse-002}"
+            cp v2/stage2/stage2_config.env.example v2/stage2/stage2_config.env
+            sed -i "s/your-project-id/${TARGET_PROJECT_ID}/g" v2/stage2/stage2_config.env
+            sed -i "s|username/gcs-confidential-client-side-encryption|${GITHUB_REPOSITORY}|g" v2/stage2/stage2_config.env
+          fi
+          chmod +x v2/stage2/*.sh v2/stage2/*.env
+
+      - name: Deploy Stage 2 Confidential VM & Cryptographic FUSE Overlay
+        run: cd v2/stage2 && ./deploy_cse_vm.sh
+
+      - name: Execute 4-Stage Zero-Plaintext E2E Validation
+        run: cd v2/stage2 && ./test_cse_vm.sh
+
+      - name: Teardown Stage 2 Infrastructure (FinOps Guarantee)
+        if: always()
+        run: cd v2/stage2 && ./cleanup_stage2.sh
